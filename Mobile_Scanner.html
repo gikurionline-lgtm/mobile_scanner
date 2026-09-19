@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Mobile Scanner</title>
+  <script src="https://unpkg.com/html5-qrcode" type="text/javascript"></script>
+  <style>
+    :root { --bg: #0f172a; --card: #1e293b; --text: #f8fafc; --muted: #94a3b8; --primary: #3b82f6; --good: #10b981; --bad: #ef4444; --warn: #f59e0b; }
+    * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+    html, body { height: 100dvh; overflow: hidden; background: var(--bg); color: var(--text); font-family: system-ui, sans-serif; touch-action: manipulation; }
+    
+    .app-shell { display: flex; flex-direction: column; height: 100dvh; width: 100vw; max-width: 100%; overflow: hidden; }
+    
+    .header { padding: 16px; background: #020617; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #334155; }
+    .header h1 { font-size: 18px; font-weight: 700; }
+    .session-badge { font-size: 12px; background: #334155; padding: 4px 8px; border-radius: 12px; color: var(--muted); }
+    
+    #reader { width: 100%; flex: 1; position: relative; background: #000; overflow: hidden; }
+    #reader video { object-fit: cover; height: 100% !important; width: 100% !important; }
+    #reader__scan_region { height: 100% !important; }
+    
+    .scan-line { position: absolute; top: 50%; left: 10%; width: 80%; height: 2px; background: var(--primary); box-shadow: 0 0 10px var(--primary); animation: scan 2s infinite linear; z-index: 10; pointer-events: none; }
+    @keyframes scan { 0% { top: 30%; } 50% { top: 70%; } 100% { top: 30%; } }
+    
+    .controls { padding: 20px; background: #020617; border-top: 1px solid #334155; }
+    .manual-row { display: flex; gap: 10px; margin-bottom: 16px; }
+    .manual-row input { flex: 1; padding: 14px; border-radius: 8px; border: 1px solid #334155; background: #1e293b; color: #fff; font-size: 16px; }
+    .btn { padding: 14px; border-radius: 8px; border: none; font-weight: 700; font-size: 16px; cursor: pointer; width: 100%; }
+    .btn-primary { background: var(--primary); color: #fff; }
+    .btn-stop { background: var(--bad); color: #fff; margin-top: 10px; }
+    
+    .result-overlay { position: absolute; bottom: 0; left: 0; right: 0; background: var(--card); border-top-left-radius: 24px; border-top-right-radius: 24px; padding: 24px; transform: translateY(100%); transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1); z-index: 50; box-shadow: 0 -10px 30px rgba(0,0,0,0.5); max-height: 60vh; overflow-y: auto; }
+    .result-overlay.show { transform: translateY(0); }
+    
+    .status-pill { display: inline-block; padding: 6px 14px; border-radius: 999px; font-size: 14px; font-weight: 800; text-transform: uppercase; margin-bottom: 12px; }
+    .pill-found { background: rgba(16, 185, 129, 0.2); color: var(--good); }
+    .pill-missing { background: rgba(239, 68, 68, 0.2); color: var(--bad); }
+    .pill-mislocated { background: rgba(245, 158, 11, 0.2); color: var(--warn); }
+    
+    .book-title { font-size: 22px; font-weight: 800; margin-bottom: 4px; line-height: 1.2; }
+    .book-author { font-size: 16px; color: var(--muted); margin-bottom: 16px; }
+    
+    .meta-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 20px; }
+    .meta-item label { font-size: 11px; text-transform: uppercase; color: var(--muted); font-weight: 700; display: block; margin-bottom: 2px; }
+    .meta-item p { font-size: 16px; font-weight: 600; word-break: break-word; }
+    
+    .toast { position: fixed; top: 20px; left: 50%; transform: translateX(-50%); background: #334155; color: #fff; padding: 12px 24px; border-radius: 8px; font-weight: 600; z-index: 100; opacity: 0; transition: opacity 0.3s; pointer-events: none; }
+    .toast.show { opacity: 1; }
+  </style>
+</head>
+<body>
+  <div class="app-shell">
+    <div class="header">
+      <h1>Stock Scanner</h1>
+      <span class="session-badge" id="sessionName">Loading...</span>
+    </div>
+    
+    <div id="reader">
+      <div class="scan-line"></div>
+    </div>
+    
+    <div class="controls">
+      <div class="manual-row">
+        <input type="text" id="manualInput" placeholder="Manual entry...">
+        <button class="btn btn-primary" style="width:auto; padding:0 20px;" onclick="processManual()">Send</button>
+      </div>
+      <button class="btn btn-stop" id="btnToggle" onclick="toggleCamera()">Stop Camera</button>
+    </div>
+
+    <div class="result-overlay" id="resultOverlay">
+      <div id="resultContent"></div>
+      <button class="btn btn-primary" onclick="hideResult()">Scan Next Item</button>
+    </div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <script>
+    // CONFIGURATION: Paste your deployed Google Apps Script Web App URL here
+    const WEB_APP_URL = "PASTE_YOUR_GAS_WEB_APP_URL_HERE"; 
+    const USERNAME = "PASTE_YOUR_USERNAME_HERE"; // Or implement a login screen
+
+    let html5QrcodeScanner = null;
+    let isScanning = false;
+    let lastScannedCode = "";
+    let lastScanTime = 0;
+    let currentSessionId = "";
+
+    document.addEventListener('DOMContentLoaded', async () => {
+      await loadSession();
+      startCamera();
+    });
+
+    async function loadSession() {
+      try {
+        const res = await fetch(WEB_APP_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'text/plain' }, // Bypasses CORS preflight
+          body: JSON.stringify({ action: 'getBootstrap', username: USERNAME })
+        });
+        const data = await res.json();
+        if (data.sessions && data.sessions.length > 0) {
+          const openSession = data.sessions.find(s => s.status === 'OPEN');
+          if (openSession) {
+            currentSessionId = openSession.id;
+            document.getElementById('sessionName').innerText = openSession.name;
+          } else {
+            showToast("No open session!");
+          }
+        }
+      } catch (err) {
+        showToast("Network error loading session");
+      }
+    }
+
+    function startCamera() {
+      html5QrcodeScanner = new Html5Qrcode("reader");
+      const config = { fps: 10, qrbox: { width: 280, height: 150 }, formatsToSupport: [
+        Html5QrcodeSupportedFormats.CODE_128, Html5QrcodeSupportedFormats.CODE_39, 
+        Html5QrcodeSupportedFormats.EAN_13, Html5QrcodeSupportedFormats.EAN_8, 
+        Html5QrcodeSupportedFormats.UPC_A, Html5QrcodeSupportedFormats.ITF, Html5QrcodeSupportedFormats.CODABAR
+      ]};
+      
+      html5QrcodeScanner.start({ facingMode: "environment" }, config, onScanSuccess)
+        .then(() => { isScanning = true; document.getElementById('btnToggle').innerText = "Stop Camera"; })
+        .catch(err => showToast("Camera error: " + err));
+    }
+
+    function stopCamera() {
+      if (html5QrcodeScanner && isScanning) {
+        html5QrcodeScanner.stop().then(() => { isScanning = false; document.getElementById('btnToggle').innerText = "Start Camera"; });
+      }
+    }
+
+    function toggleCamera() {
+      if (isScanning) stopCamera(); else startCamera();
+    }
+
+    function onScanSuccess(decodedText) {
+      const now = Date.now();
+      // Debounce: Prevent scanning same barcode within 3 seconds
+      if (decodedText === lastScannedCode && (now - lastScanTime) < 3000) return;
+      
+      lastScannedCode = decodedText;
+      lastScanTime = now;
+      
+      // Vibrate feedback
+      if (navigator.vibrate) navigator.vibrate(150);
+      
+      sendToBackend(decodedText);
+    }
+
+    function processManual() {
+      const input = document.getElementById('manualInput');
+      const code = input.value.trim();
+      if (!code) return;
+      input.value = "";
+      sendToBackend(code);
+    }
+
+    async function sendToBackend(code) {
+      if (!currentSessionId) return showToast("No active session!");
+      
+      try {
+        const res = await fetch(WEB_APP_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'text/plain' },
+          body: JSON.stringify({ action: 'scanBook', sessionId: currentSessionId, code: code, username: USERNAME })
+        });
+        const data = await res.json();
+        
+        if (data.ok) {
+          showResult(data.scan);
+        } else {
+          showToast("Error: " + data.error);
+        }
+      } catch (err) {
+        showToast("Network failure. Code: " + code);
+      }
+    }
+
+    function showResult(scan) {
+      const overlay = document.getElementById('resultOverlay');
+      const content = document.getElementById('resultContent');
+      
+      const statusClass = scan.result === 'FOUND' ? 'pill-found' : (scan.result === 'MISLOCATED' ? 'pill-mislocated' : 'pill-missing');
+      
+      content.innerHTML = `
+        <span class="status-pill ${statusClass}">${scan.result}</span>
+        <h2 class="book-title">${scan.core.title || 'Unknown Item'}</h2>
+        <p class="book-author">${scan.core.author || ''}</p>
+        <div class="meta-grid">
+          <div class="meta-item"><label>Code</label><p>${scan.code}</p></div>
+          <div class="meta-item"><label>Call No.</label><p>${scan.core.callNumber || '-'}</p></div>
+          <div class="meta-item"><label>Expected</label><p>${scan.expectedLocation || '-'}</p></div>
+          <div class="meta-item"><label>Found</label><p>${scan.foundLocation}</p></div>
+        </div>
+      `;
+      overlay.classList.add('show');
+    }
+
+    function hideResult() {
+      document.getElementById('resultOverlay').classList.remove('show');
+    }
+
+    function showToast(msg) {
+      const t = document.getElementById('toast');
+      t.innerText = msg;
+      t.classList.add('show');
+      setTimeout(() => t.classList.remove('show'), 3000);
+    }
+  </script>
+</body>
+</html>
